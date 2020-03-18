@@ -14,6 +14,7 @@ class Podmaner():
         self.config_path = config_path
         self.config = {}
         self.cnt_info = {}
+        self.lock_file = '/var/lock/' + self.container_name + '_podman.lock'
 
     def read_config_file(self):
         conf_file = self.config_path + self.container_name + '.yaml'
@@ -37,9 +38,6 @@ class Podmaner():
                         '/var/lib/cni/results/']}
         with open(conf_file_name, 'w') as config_dest:
             yaml.dump(config_dict, config_dest)
-
-    def print_help(self):
-        pass
 
     def __check_cni_error(self, app_output_err):
         cni_error_re = r'(.*)(Error adding network: failed to allocate for range 0: requested IP address)(.*)'
@@ -82,29 +80,74 @@ class Podmaner():
 
         return cni_files
 
-    def __cnt_start(self):
-        cnt_process = subprocess.Popen([self.config['podman_exec_path'],
-                                       'start', self.container_name],
+    def __podman_exec(self, command):
+        podman_command_args = {'start': ['start', self.container_name],
+                               'stop': ['stop', '-t', '10', self.container_name],
+                               'ps': ['ps', '-a', '--format', 'json', '--filter', "name="+self.container_name],
+                               'inspect': ['inspect', self.container_name]}
+        proc_args = [self.config['podman_exec_path']] + podman_command_args[command]
+        podman_proc = subprocess.Popen(proc_args,
                                        stdout=subprocess.PIPE,
                                        stderr=subprocess.PIPE)
-        out, err = cnt_process.communicate()
-        return out, err, cnt_process.returncode
+        podman_proc.args
+        out, err = podman_proc.communicate()
+
+        return out, err, podman_proc.returncode
+
+    def __cnt_start(self):
+        return self.__podman_exec('start')
 
     def __get_cnt_info(self):
-        cnt_process = subprocess.Popen([self.config['podman_exec_path'],
-                                       'inspect', self.container_name],
-                                       stdout=subprocess.PIPE,
-                                       stderr=subprocess.PIPE)
-        out, err = cnt_process.communicate()
+        out, err, ret_code = self.__podman_exec('inspect')
         self.cnt_info = json.loads(out)
 
     def start_container(self):
         start_counter = 0
+        self.__lock()
         while start_counter <= 10:
             out, err, cnt_ec = self.__cnt_start()
             if cnt_ec == 0:
                 print("Container " + self.container_name + " started successfuly!")
+                self.__lock()
                 sys.exit(0)
             self.__get_cnt_info()
             self.__check_cni_error(str(err))
             ++start_counter
+
+    def stop_container(self):
+        out, err, ret_code = self.__podman_exec('stop')
+        self.__lock()
+
+    def __cnt_alive(self):
+        # in this case if command succeds the out variable will be JSON
+        out, err, cnt_ec = self.__podman_exec('ps')
+        cnt_health = json.loads(out)
+        up_status_re = r'(^Up)(.*)'
+        up_status = re.compile(up_status_re)
+
+        if re.match(up_status, cnt_health[0]['Status']):
+            return True
+        else:
+            return False
+
+    def __check_lock_exists(self):
+        if os.path.exists(self.lock_file):
+            return True
+        else:
+            return False
+
+    def __lock(self):
+        lock_status = self.__check_lock_exists()
+        cnt_status = self.__cnt_alive()
+        if lock_status and cnt_status:
+            print("Lock file " + self.lock_file + " exists"
+                  + " and container is running - exiting")
+            sys.exit(0)
+        if lock_status is False and cnt_status:
+            print("Container is running but somehow there is no lock file - creating one")
+            with open(self.lock_file, 'w') as lock:
+                lock.write(self.container_name)
+
+        if lock_status and cnt_status is False:
+            print("Lock file exists but container is not running - removing lockfile")
+            os.remove(self.lock_file)
