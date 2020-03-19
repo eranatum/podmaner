@@ -98,7 +98,7 @@ class Podmaner():
         return self.__podman_exec('start')
 
     def __get_cnt_info(self):
-        out, err, ret_code = self.__podman_exec('inspect')
+        out, err, cnt_ec = self.__podman_exec('inspect')
         self.cnt_info = json.loads(out)
 
     def start_container(self):
@@ -110,7 +110,6 @@ class Podmaner():
                 print("Container " + self.container_name + " started successfuly!")
                 self.__lock()
                 sys.exit(0)
-            self.__get_cnt_info()
             self.__check_cni_error(str(err))
             ++start_counter
 
@@ -139,6 +138,9 @@ class Podmaner():
     def __lock(self):
         lock_status = self.__check_lock_exists()
         cnt_status = self.__cnt_alive()
+        self.__get_cnt_info()
+        cnt_pid_file = '/var/run/containers/storage/overlay-containers/'
+        + self.cnt_info[0]['Id'] + '/userdata/pidfile'
         if lock_status and cnt_status:
             print("Lock file " + self.lock_file + " exists"
                   + " and container is running - exiting")
@@ -146,8 +148,11 @@ class Podmaner():
         if lock_status is False and cnt_status:
             print("Container is running but somehow there is no lock file - creating one")
             with open(self.lock_file, 'w') as lock:
-                lock.write(self.container_name)
+                lock.write(str(self.container_name))
+
+            os.symlink(cnt_pid_file, '/var/run/' + self.config_path + '_podman.pid')
 
         if lock_status and cnt_status is False:
             print("Lock file exists but container is not running - removing lockfile")
             os.remove(self.lock_file)
+            os.remove(cnt_pid_file)
